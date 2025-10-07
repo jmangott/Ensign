@@ -1,105 +1,83 @@
-name: Build and Test Ensign
+name: CMake on multiple platforms
 
 on:
   push:
+    branches: [ "master", "development" ]
   pull_request:
-  workflow_dispatch:
+    branches: [ "master", "development" ]
 
 jobs:
   build:
-    name: ${{ matrix.os }} | ${{ matrix.build_type }} | CC=${{ matrix.cc }} | FC=${{ matrix.fc }}
     runs-on: ${{ matrix.os }}
+    
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        build_type: [Release]
         include:
-          # Linux: GCC
+          # Linux GCC
           - os: ubuntu-latest
-            cc: gcc
-            fc: gfortran
-          # Linux: Clang + gfortran
+            c_compiler: gcc
+            cpp_compiler: g++
+            fortran_compiler: gcc
+            build_type: Release
+          
+          # Linux Clang
           - os: ubuntu-latest
-            cc: clang
-            fc: gfortran
-          # macOS: GCC + gfortran
+            c_compiler: clang
+            cpp_compiler: clang++
+            fortran_compiler: gcc
+            build_type: Release
+          
+          # macOS GCC
           - os: macos-latest
-            cc: gcc
-            fc: gfortran
-          # macOS: Clang + gfortran
-          - os: macos-latest
-            cc: clang
-            fc: gfortran
-          # Windows: GCC + gfortran via MSYS2/MinGW
+            c_compiler: gcc-13
+            cpp_compiler: g++-13
+            fortran_compiler: gcc
+            fortran_version: 13
+            build_type: Release
+          
+          # Windows GCC (MinGW)
           - os: windows-latest
-            cc: gcc
-            fc: gfortran
+            c_compiler: gcc
+            cpp_compiler: g++
+            fortran_compiler: gcc
+            build_type: Release
+
+          # Windows MSVC
+          - os: windows-latest
+            c_compiler: cl
+            cpp_compiler: cl
+            fortran_compiler: intel-classic  # or intel if using oneAPI
+            build_type: Release
 
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
-      #####################################################################
-      # 🧩 macOS setup — reinstall CMake to avoid stale compatibility files
-      #####################################################################
-      - name: Update and reinstall CMake (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew update
-          brew reinstall cmake
-          cmake --version
-
-      ##########################################################
-      # 🧩 Install dependencies per OS
-      ##########################################################
-      - name: Install dependencies (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gfortran cmake make git
-          if [ "${{ matrix.cc }}" = "clang" ]; then
-            sudo apt-get install -y clang
-          else
-            sudo apt-get install -y gcc g++
-          fi
-
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install gcc gfortran fftw
-          brew info fftw
-          cmake --version
-
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          choco install -y msys2
-          export PATH=/c/tools/msys64/usr/bin:$PATH
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-gcc-fortran mingw-w64-x86_64-cmake make
-          cmake --version
-          gfortran --version
-
-      ##########################################################
-      # 🧩 Configure, build, and test
-      ##########################################################
-      - name: Configure with CMake
-        shell: bash
-        run: |
-          export CC=${{ matrix.cc }}
-          export FC=${{ matrix.fc }}
-          cmake -S . -B build \
-                -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-                -DENABLE_TESTS=ON
-
-      - name: Build Ensign
-        shell: bash
-        run: |
-          cmake --build build --parallel 2
-
-      - name: Run tests
-        shell: bash
-        working-directory: build
-        run: ctest --output-on-failure
+    - uses: actions/checkout@v4
+    
+    - name: Setup Fortran
+      uses: fortran-lang/setup-fortran@v1
+      id: setup-fortran
+      with:
+        compiler: ${{ matrix.fortran_compiler }}
+        version: ${{ matrix.fortran_version || '' }}
+    
+    - name: Set reusable strings
+      id: strings
+      shell: bash
+      run: |
+        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+    
+    - name: Configure CMake
+      run: >
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+        -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+        -DCMAKE_Fortran_COMPILER=${{ steps.setup-fortran.outputs.fc }}
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -S ${{ github.workspace }}
+    
+    - name: Build
+      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+    
+    - name: Test
+      working-directory: ${{ steps.strings.outputs.build-output-dir }}
+      run: ctest --build-config ${{ matrix.build_type }} --output-on-failure
