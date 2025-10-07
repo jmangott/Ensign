@@ -1,127 +1,105 @@
-name: Build and Test (Multi-Platform)
+name: Build and Test Ensign
 
 on:
   push:
-    branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: ${{ matrix.os }} / ${{ matrix.cc }} + ${{ matrix.fc }}
+    name: ${{ matrix.os }} | ${{ matrix.build_type }} | CC=${{ matrix.cc }} | FC=${{ matrix.fc }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        build_type: [Release]
         include:
-          # --- Linux (Ubuntu) ---
+          # Linux: GCC
           - os: ubuntu-latest
             cc: gcc
-            cxx: g++
             fc: gfortran
-
+          # Linux: Clang + gfortran
           - os: ubuntu-latest
             cc: clang
-            cxx: clang++
             fc: gfortran
-
-          # --- macOS ---
+          # macOS: GCC + gfortran
           - os: macos-latest
             cc: gcc
-            cxx: g++
             fc: gfortran
-            use_homebrew_gcc: true
-
+          # macOS: Clang + gfortran
           - os: macos-latest
             cc: clang
-            cxx: clang++
             fc: gfortran
-
-          # --- Windows (MinGW only; skip MSVC + gfortran) ---
+          # Windows: GCC + gfortran via MSYS2/MinGW
           - os: windows-latest
             cc: gcc
-            cxx: g++
             fc: gfortran
-            use_msys2: true
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # --- Linux: install gfortran ---
-      - name: Set up Fortran (Linux)
+      #####################################################################
+      # 🧩 macOS setup — reinstall CMake to avoid stale compatibility files
+      #####################################################################
+      - name: Update and reinstall CMake (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew reinstall cmake
+          cmake --version
+
+      ##########################################################
+      # 🧩 Install dependencies per OS
+      ##########################################################
+      - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gfortran
-
-      # --- macOS: GCC + GFortran via Homebrew ---
-      - name: Set up Fortran (macOS Homebrew GCC)
-        if: runner.os == 'macOS' && matrix.use_homebrew_gcc == true
-        run: |
-          brew update
-          brew install gcc
-          GCC_VERSION=$(brew list --versions gcc | awk '{print $2}')
-          echo "Using GCC version: $GCC_VERSION"
-          echo "CC=gcc-${GCC_VERSION%%.*}" >> $GITHUB_ENV
-          echo "CXX=g++-${GCC_VERSION%%.*}" >> $GITHUB_ENV
-          echo "FC=gfortran-${GCC_VERSION%%.*}" >> $GITHUB_ENV
-          which gcc-${GCC_VERSION%%.*}
-          gcc-${GCC_VERSION%%.*} --version
-          gfortran-${GCC_VERSION%%.*} --version
-
-      # --- macOS: Clang + GFortran ---
-      - name: Set up Fortran (macOS Clang)
-        if: runner.os == 'macOS' && matrix.use_homebrew_gcc != true
-        run: |
-          brew install gcc
-          echo "FC=gfortran" >> $GITHUB_ENV
-
-      # --- Windows: MinGW-w64 (MSYS2) setup ---
-      - name: Set up MSYS2 (Windows + GCC)
-        if: runner.os == 'Windows' && matrix.use_msys2 == true
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-gcc-fortran
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-make
-
-      - name: Build and test (MSYS2)
-        if: runner.os == 'Windows' && matrix.use_msys2 == true
-        shell: msys2 {0}
-        run: |
-          cmake -S . -B build \
-            -G "MinGW Makefiles" \
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --parallel
-          ctest --test-dir build --output-on-failure
-
-      # --- Standard builds (Linux + macOS) ---
-      - name: Configure (CMake)
-        if: runner.os != 'Windows' || matrix.use_msys2 != true
-        run: |
-          LINK_FLAGS=""
-          # Add linker flags for Clang + GFortran on Linux
-          if [ "${{ runner.os }}" = "Linux" ] && [ "${{ matrix.cc }}" = "clang" ] && [ "${{ matrix.fc }}" = "gfortran" ]; then
-            LINK_FLAGS="-DCMAKE_EXE_LINKER_FLAGS='-lgfortran -lquadmath -lm'"
+          sudo apt-get install -y gfortran cmake make git
+          if [ "${{ matrix.cc }}" = "clang" ]; then
+            sudo apt-get install -y clang
+          else
+            sudo apt-get install -y gcc g++
           fi
 
-          echo "Configuring with CC=${{ env.CC || matrix.cc }}, FC=${{ env.FC || matrix.fc }}"
-          cmake -S . -B build \
-            -DCMAKE_C_COMPILER=${{ env.CC || matrix.cc }} \
-            -DCMAKE_CXX_COMPILER=${{ env.CXX || matrix.cxx }} \
-            -DCMAKE_Fortran_COMPILER=${{ env.FC || matrix.fc }} \
-            -DCMAKE_BUILD_TYPE=Release \
-            $LINK_FLAGS
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install gcc gfortran fftw
+          brew info fftw
+          cmake --version
 
-      - name: Build
-        if: runner.os != 'Windows' || matrix.use_msys2 != true
-        run: cmake --build build --parallel
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install -y msys2
+          export PATH=/c/tools/msys64/usr/bin:$PATH
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-gcc-fortran mingw-w64-x86_64-cmake make
+          cmake --version
+          gfortran --version
+
+      ##########################################################
+      # 🧩 Configure, build, and test
+      ##########################################################
+      - name: Configure with CMake
+        shell: bash
+        run: |
+          export CC=${{ matrix.cc }}
+          export FC=${{ matrix.fc }}
+          cmake -S . -B build \
+                -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -DENABLE_TESTS=ON
+
+      - name: Build Ensign
+        shell: bash
+        run: |
+          cmake --build build --parallel 2
 
       - name: Run tests
-        if: runner.os != 'Windows' || matrix.use_msys2 != true
-        run: ctest --test-dir build --output-on-failure
+        shell: bash
+        working-directory: build
+        run: ctest --output-on-failure
